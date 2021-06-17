@@ -31,8 +31,6 @@ import (
 	"k8s.io/client-go/util/workqueue"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -42,15 +40,13 @@ import (
 	. "github.com/onsi/gomega"
 
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	"k8s.io/client-go/kubernetes/fake"
+	ctrlFake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"sigs.k8s.io/secrets-store-csi-driver/apis/v1alpha1"
-	"sigs.k8s.io/secrets-store-csi-driver/controllers"
 	secretsStoreFakeClient "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned/fake"
 	"sigs.k8s.io/secrets-store-csi-driver/pkg/k8s"
 	secretsstore "sigs.k8s.io/secrets-store-csi-driver/pkg/secrets-store"
@@ -58,21 +54,21 @@ import (
 )
 
 var (
-	fakeRecorder = record.NewFakeRecorder(20)
-	testenv *envtest.Environment
-	cfg *rest.Config
+	fakeRecorder     = record.NewFakeRecorder(20)
+	testenv          *envtest.Environment
+	cfg              *rest.Config
 	controllerClient client.Client
 )
 
 func TestMain(m *testing.M) {
-    setup()
-    code := m.Run() 
-    // shutdown()
-    os.Exit(code)
+	setup()
+	code := m.Run()
+	// shutdown()
+	os.Exit(code)
 }
 
-func setup(){
-	
+func setup() {
+
 }
 
 func setupScheme() (*runtime.Scheme, error) {
@@ -86,47 +82,11 @@ func setupScheme() (*runtime.Scheme, error) {
 	return scheme, nil
 }
 
-func newTestReconciler(s *runtime.Scheme, config *rest.Config, kubeClient kubernetes.Interface, crdClient *secretsStoreFakeClient.Clientset, rotationPollInterval time.Duration, socketPath string, filteredWatchSecret bool) (*Reconciler, error) {
+func newTestReconciler(client client.Reader, s *runtime.Scheme, config *rest.Config, kubeClient kubernetes.Interface, crdClient *secretsStoreFakeClient.Clientset, rotationPollInterval time.Duration, socketPath string, filteredWatchSecret bool) (*Reconciler, error) {
 	secretStore, err := k8s.New(kubeClient, 5*time.Second, filteredWatchSecret)
 	if err != nil {
 		return nil, err
 	}
-
-	manager, err := ctrl.NewManager(config, ctrl.Options{
-		Scheme:         s,
-		LeaderElection: false,
-		NewCache: cache.BuilderWithOptions(cache.Options{
-			SelectorsByObject: cache.SelectorsByObject{
-				// this enables filtered watch of pods based on the node name
-				// only pods running on the same node as the csi driver will be cached
-				&v1.Pod{}: {
-					Field: fields.OneTermEqualSelector("spec.nodeName", "test-node"),
-				},
-				// this enables filtered watch of secretproviderclasspodstatuses based on the internal node label
-				// internal.secrets-store.csi.k8s.io/node-name=<node name> added by csi driver
-				&v1alpha1.SecretProviderClassPodStatus{}: {
-					Label: labels.SelectorFromSet(
-						labels.Set{
-							v1alpha1.InternalNodeLabel: "test-node",
-						},
-					),
-				},
-				// this enables filtered watch of secrets based on the label (eg. secrets-store.csi.k8s.io/managed=true)
-				// added to the secrets created by the CSI driver
-				&v1.Secret{}: {
-					Label: labels.SelectorFromSet(
-						labels.Set{
-							controllers.SecretManagedLabel: "true",
-						},
-					),
-				},
-			},
-		}),
-	})
-
-	go func() {
-		manager.Start(context.TODO())
-	}()
 
 	return &Reconciler{
 		providerVolumePath:   socketPath,
@@ -137,9 +97,8 @@ func newTestReconciler(s *runtime.Scheme, config *rest.Config, kubeClient kubern
 		eventRecorder:        fakeRecorder,
 		kubeClient:           kubeClient,
 		crdClient:            crdClient,
-		// cache:                manager.GetCache(),
+		cache:                client,
 		secretStore:          secretStore,
-		manager:              manager,
 	}, nil
 }
 
@@ -498,29 +457,19 @@ func TestReconcileError(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			os.Setenv("KUBEBUILDER_ASSETS", "/Users/nichaud/poc/kubebuilder/bin")
-			if test.name == "failed to get NodePublishSecretRef secret" {
-				fmt.Println()
-			}
 			kubeClient := fake.NewSimpleClientset(test.podToAdd, test.secretToAdd)
 			crdClient := secretsStoreFakeClient.NewSimpleClientset(test.secretProviderClassPodStatusToProcess, test.secretProviderClassToAdd)
 
-			testenv := &envtest.Environment{}
-			cfg, err := testenv.Start()
-			defer testenv.Stop()
-			// Expect(err).NotTo(HaveOccurred())
+			initObjects := []runtime.Object{
+				test.podToAdd,
+				test.secretToAdd,
+				test.secretProviderClassPodStatusToProcess,
+				test.secretProviderClassToAdd,
+			}
+			client := ctrlFake.NewFakeClientWithScheme(scheme, initObjects...)
 
-			testReconciler, err := newTestReconciler(scheme, cfg, kubeClient, crdClient, test.rotationPollInterval, test.socketPath, false)
+			testReconciler, err := newTestReconciler(client, scheme, cfg, kubeClient, crdClient, test.rotationPollInterval, test.socketPath, false)
 			g.Expect(err).NotTo(HaveOccurred())
-
-			ctx := context.Background()
-			// go testReconciler.cache.Start(ctx)
-
-			client, err := client.New(cfg, client.Options{Scheme: scheme})
-			client.Create(ctx, test.podToAdd)
-			client.Create(ctx, test.secretToAdd)
-			client.Create(ctx, test.secretProviderClassPodStatusToProcess)
-			client.Create(ctx, test.secretProviderClassToAdd)
 
 			err = testReconciler.secretStore.Run(wait.NeverStop)
 			g.Expect(err).NotTo(HaveOccurred())

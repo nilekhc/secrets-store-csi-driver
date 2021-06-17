@@ -41,8 +41,6 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
-	controller "sigs.k8s.io/controller-runtime"
-	controllercache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"sigs.k8s.io/secrets-store-csi-driver/apis/v1alpha1"
@@ -84,9 +82,8 @@ type Reconciler struct {
 	eventRecorder        record.EventRecorder
 	kubeClient           kubernetes.Interface
 	crdClient            versioned.Interface
-	cache                controllercache.Cache
+	cache                client.Reader
 	secretStore          k8s.Store
-	manager              controller.Manager
 }
 
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
@@ -94,7 +91,7 @@ type Reconciler struct {
 // TODO (aramase) remove this as part of https://github.com/kubernetes-sigs/secrets-store-csi-driver/issues/585
 
 // NewReconciler returns a new reconciler for rotation
-func NewReconciler(manager controller.Manager, s *runtime.Scheme, providerVolumePath, nodeName string, rotationPollInterval time.Duration, providerClients *secretsstore.PluginClientBuilder, filteredWatchSecret bool) (*Reconciler, error) {
+func NewReconciler(reader client.Reader, s *runtime.Scheme, providerVolumePath, nodeName string, rotationPollInterval time.Duration, providerClients *secretsstore.PluginClientBuilder, filteredWatchSecret bool) (*Reconciler, error) {
 	config, err := buildConfig()
 	if err != nil {
 		return nil, err
@@ -119,7 +116,7 @@ func NewReconciler(manager controller.Manager, s *runtime.Scheme, providerVolume
 		eventRecorder:        recorder,
 		kubeClient:           kubeClient,
 		crdClient:            crdClient,
-		cache:                manager.GetCache(),
+		cache:                reader,
 		secretStore:          secretStore,
 	}, nil
 }
@@ -248,7 +245,7 @@ func (r *Reconciler) reconcile(ctx context.Context, spcps *v1alpha1.SecretProvid
 
 	// get pod from manager's cache
 	pod := v1.Pod{}
-	err = r.manager.GetCache().Get(
+	err = r.cache.Get(
 		ctx,
 		client.ObjectKey{
 			Namespace: spcps.Namespace,
@@ -271,7 +268,7 @@ func (r *Reconciler) reconcile(ctx context.Context, spcps *v1alpha1.SecretProvid
 
 	// get the secret provider class which pod status is referencing from manager's cache
 	spc := v1alpha1.SecretProviderClass{}
-	err = r.manager.GetCache().Get(
+	err = r.cache.Get(
 		ctx,
 		client.ObjectKey{
 			Namespace: spcps.Namespace,
